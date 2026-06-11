@@ -1,55 +1,58 @@
-# client.py - Running on Raspberry Pi
+# client.py (Updated with Gate Trigger Functionality)
 import time
 import requests
-import Adafruit_GPIO.GPIO as GPIO
 from picamera import PiCamera
 import pytesseract
 from PIL import Image
 import os
+# gpiozero is the modern standard for Pi GPIO control
+from gpiozero import DigitalInputDevice, OutputDevice 
 
 # Configuration
-PIR_PIN = 17  # GPIO pin connected to PIR OUT
+PIR_PIN = 17       # GPIO pin connected to PIR OUT (Pin 11)
+RELAY_PIN = 23     # GPIO pin connected to Relay IN (Pin 16)
 SERVER_URL = "http://YOUR_SERVER_IP:5000/api/check-arrival"
 TEMP_IMAGE = "arrival.jpg"
 
-# Tesseract setup (ensure tesseract-ocr is installed on Pi)
-# pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
-
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(PIR_PIN, GPIO.IN)
+# Initialize Hardware using gpiozero
+motion_sensor = DigitalInputDevice(PIR_PIN)
+gate_relay = OutputDevice(RELAY_PIN, active_high=True, initial_value=False)
 camera = PiCamera()
 
+def trigger_gate_relay():
+    """Simulates a button press to open the gate"""
+    print("[Hardware] Activating gate relay...")
+    gate_relay.on()       # Close the circuit (Trigger gate motor)
+    time.sleep(1.0)       # Hold for 1 second
+    gate_relay.off()      # Open the circuit 
+    print("[Hardware] Relay released.")
+
 def capture_and_process():
-    print("Motion detected! Capturing image...")
-    
-    # Warm up camera, set focus if necessary
+    print("\nMotion detected! Capturing image...")
     camera.start_preview()
-    time.sleep(1) # Important for lighting adjustment
+    time.sleep(1) # Allow camera to adjust to lighting
     camera.capture(TEMP_IMAGE)
     camera.stop_preview()
 
     try:
-        # Pre-process image (grayscale improves OCR accuracy)
+        # Pre-process image to grayscale for better OCR
         img = Image.open(TEMP_IMAGE).convert('L')
-        # (Optional: Add more processing like thresholding)
 
         # Apply OCR
-        # config='--psm 8' tells Tesseract to look for a single word/block
         text = pytesseract.image_to_string(img, config='--psm 8')
-        license_plate = "".join(text.split()).upper() # Clean the text
+        license_plate = "".join(text.split()).upper()
         
-        if len(license_plate) > 3: # Ignore trivial OCR noise
+        if len(license_plate) > 3:
             print(f"OCR Result: {license_plate}")
             send_to_server(license_plate)
         else:
-            print("OCR did not find a valid plate.")
+            print("OCR did not find a clear license plate.")
 
     except Exception as e:
-        print(f"Error during processing: {e}")
+        print(f"Error during image processing: {e}")
     finally:
-        os.remove(TEMP_IMAGE) # Clean up
-
-# Update the send_to_server function in your client.py file:
+        if os.path.exists(TEMP_IMAGE):
+            os.remove(TEMP_IMAGE)
 
 def send_to_server(plate_number):
     payload = {'license_plate': plate_number}
@@ -57,20 +60,24 @@ def send_to_server(plate_number):
         response = requests.post(SERVER_URL, json=payload, timeout=5)
         if response.status_code == 200:
             result = response.json()
+            
             if result['registered']:
                 print("\n" + "="*40)
-                print("   ACCESS GRANTED - GATE OPENING")
+                print("   ACCESS GRANTED - OPENING GATE")
                 print("="*40)
                 print(f"Resident:     {result['owner_name']}")
                 print(f"Apartment:    {result['apartment_number']}")
                 print(f"Parking Bay:  {result['allotted_parking_slot']}")
                 print("="*40 + "\n")
                 
-                # physical_gate_relay_trigger()
+                # --- PHYSICAL COMMAND TO OPEN THE GATE ---
+                trigger_gate_relay()
+                
             else:
-                print(f"ACCESS DENIED: Plate {plate_number} not recognized.")
+                print(f"\n[ACCESS DENIED]: Plate {plate_number} not recognized.")
         else:
             print(f"Server Error: {response.status_code}")
+            
     except requests.exceptions.RequestException as e:
         print(f"Connection Error: {e}")
 
@@ -79,10 +86,12 @@ print("System Active. Waiting for car arrival...")
 # Main Loop
 try:
     while True:
-        if GPIO.input(PIR_PIN):
+        # gpiozero uses .is_active to check the high/low state of the sensor
+        if motion_sensor.is_active:
             capture_and_process()
-            # Cool down to prevent multiple triggers from one car
-            time.sleep(10)
+            # 15-second cooldown to let the car pull through before sensing again
+            time.sleep(15) 
         time.sleep(0.1)
+        
 except KeyboardInterrupt:
-    GPIO.cleanup()
+    print("\nShutting down ALPR system.")
